@@ -88,6 +88,7 @@ select option{background:var(--bg3)}
 .icon-btn{background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text3);cursor:pointer;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:13px;transition:all .15s}
 .icon-btn:hover{color:var(--text);background:var(--bg3)}
 .icon-btn.del:hover{color:var(--red);border-color:var(--red-border);background:var(--red-dim)}
+.icon-btn.cln:hover{color:var(--green);border-color:var(--green-border);background:var(--green-dim)}
 .icon-btn.edt:hover{color:var(--blue);border-color:var(--blue-border);background:var(--blue-dim)}
 .empty-state{padding:3rem;text-align:center;color:var(--text2);font-size:13px}
 
@@ -514,6 +515,7 @@ function renderRules() {
       <span class="note-cell" title="${r.note||''}">${r.note||'—'}</span>
       <span class="actions">
         <button class="icon-btn edt" onclick="editRule(${r.id})" title="Edit">✎</button>
+        <button class="icon-btn cln" onclick="cloneRule(${r.id})" title="Clone">⧉</button>
         <button class="icon-btn del" onclick="deleteRule(${r.id})" title="Delete">✕</button>
       </span>
     </div>`).join('');
@@ -535,6 +537,28 @@ function editRule(id) {
   document.getElementById('f-note').value = r.note || '';
   deleteRule(id);
   showTab('add');
+}
+
+function cloneRule(id) {
+  const r = rules.find(x => x.id === id);
+  if (!r) return;
+  document.getElementById('f-proto').value = r.proto;
+  document.getElementById('f-host-port').value = '';
+  document.getElementById('f-vm-ip').value = r.vmIp;
+  document.getElementById('f-vm-port').value = r.vmPort;
+  document.getElementById('f-note').value = r.note ? r.note + ' (copy)' : '';
+  showTab('add');
+  document.getElementById('f-host-port').focus();
+  // Flash hint
+  const hint = document.querySelector('#panel-add .hint');
+  if (hint) {
+    hint.style.color = 'var(--green)';
+    hint.textContent = 'Cloned from existing rule — enter a new host port to save.';
+    setTimeout(() => {
+      hint.style.color = '';
+      hint.textContent = 'Port on your public IP — reserved: 22 (SSH), 8006 (Proxmox UI), 8007, 5900, 3128, 111';
+    }, 3000);
+  }
 }
 
 const RESERVED = {
