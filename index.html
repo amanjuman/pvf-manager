@@ -130,6 +130,16 @@ pre#script-out{padding:1.25rem;font-family:var(--mono);font-size:12.5px;line-hei
 .tag-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:.75rem}
 .tag{font-size:11px;font-family:var(--mono);padding:3px 9px;border-radius:4px;background:var(--bg3);color:var(--text2);border:1px solid var(--border)}
 
+
+/* Import drop zone */
+#drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:3rem 2rem;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:1.25rem}
+#drop-zone:hover,#drop-zone.drag-over{border-color:var(--blue);background:var(--blue-dim)}
+.drop-icon{font-size:2.5rem;margin-bottom:.75rem}
+.drop-title{font-size:15px;font-weight:500;margin-bottom:.25rem}
+.drop-sub{font-size:13px;color:var(--text2)}
+.import-row-ok{color:var(--green);font-size:12px;font-family:var(--mono)}
+.import-row-skip{color:var(--yellow);font-size:12px;font-family:var(--mono)}
+
 footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--border);font-size:12px;color:var(--text3);font-family:var(--mono);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}
 footer a{color:var(--text2);text-decoration:none}
 footer a:hover{color:var(--blue)}
@@ -223,6 +233,7 @@ footer a:hover{color:var(--blue)}
   <div class="tabs">
     <button class="tab active" onclick="showTab('rules')">Rules</button>
     <button class="tab" onclick="showTab('add')">Add rule</button>
+    <button class="tab" onclick="showTab('import')">⬆ Import</button>
     <button class="tab" onclick="showTab('script')">Script</button>
     <button class="tab" onclick="showTab('install')">Install guide</button>
     <button class="tab" onclick="showTab('about')">About</button>
@@ -269,6 +280,41 @@ footer a:hover{color:var(--blue)}
         <span class="msg" id="add-msg"></span>
       </div>
     </div>
+  </div>
+
+
+  <!-- Import panel -->
+  <div id="panel-import" class="panel">
+    <div class="about-card" style="margin-bottom:1rem">
+      <h3>Import from existing script</h3>
+      <p>Upload your existing <code>iptables-portforward.sh</code> to import rules from it. Duplicate rules (same proto + host port) will be skipped automatically.</p>
+    </div>
+
+    <div id="drop-zone">
+      <div class="drop-icon">📂</div>
+      <div class="drop-title">Drop your .sh script here</div>
+      <div class="drop-sub">or click to browse</div>
+      <input type="file" id="import-file" accept=".sh,.txt" style="display:none" onchange="handleFileSelect(event)">
+    </div>
+
+    <div id="import-preview" style="display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;flex-wrap:wrap;gap:8px">
+        <span style="font-size:13px;color:var(--text2)" id="import-summary"></span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-green" onclick="confirmImport('merge')">⊕ Merge with existing</button>
+          <button class="btn" style="color:var(--yellow);border-color:var(--yellow-border);background:var(--yellow-dim)" onclick="confirmImport('replace')">↺ Replace all rules</button>
+          <button class="btn btn-ghost" onclick="cancelImport()">Cancel</button>
+        </div>
+      </div>
+      <div class="rules-wrap">
+        <div class="rules-head">
+          <span>Proto</span><span>Host port</span><span></span><span>VM IP:port</span><span></span><span>Note</span><span>Status</span>
+        </div>
+        <div id="import-preview-body"></div>
+      </div>
+    </div>
+
+    <div id="import-msg-area" style="margin-top:1rem"></div>
   </div>
 
   <!-- Script panel -->
@@ -443,7 +489,7 @@ function updateHeader() {
 }
 
 function showTab(t) {
-  const tabs = ['rules','add','script','install','about'];
+  const tabs = ['rules','add','import','script','install','about'];
   tabs.forEach(x => {
     document.getElementById('panel-'+x).classList.toggle('active', x===t);
   });
@@ -572,6 +618,139 @@ function downloadScript() {
   const blob = new Blob([document.getElementById('script-out').textContent], { type: 'text/plain' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
 }
+
+
+// ── Import ──────────────────────────────────────────────────────
+let parsedImport = [];
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('click', () => document.getElementById('import-file').click());
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) readImportFile(file);
+});
+
+function handleFileSelect(e) {
+  const file = e.target.files[0];
+  if (file) readImportFile(file);
+}
+
+function readImportFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => parseScript(e.target.result);
+  reader.readAsText(file);
+}
+
+function parseScript(content) {
+  parsedImport = [];
+  const lines = content.split('\n');
+  let pendingNote = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    // Capture comment as note (ignore boilerplate comments)
+    if (line.startsWith('#')) {
+      const txt = line.replace(/^#\s*/, '');
+      if (!txt.match(/^(Proxmox|Host:|Generated|https?:|Flush|iptables)/i)) {
+        pendingNote = txt;
+      }
+      continue;
+    }
+
+    // Match PREROUTING DNAT rule
+    const m = line.match(
+      /iptables\s+-t\s+nat\s+-A\s+PREROUTING.*?-p\s+(tcp|udp)\s+--dport\s+(\d+)\s+-j\s+DNAT\s+--to-destination\s+([\d.]+):(\d+)/i
+    );
+    if (m) {
+      parsedImport.push({
+        id: Date.now() + parsedImport.length,
+        proto: m[1].toLowerCase(),
+        hostPort: parseInt(m[2]),
+        vmIp: m[3],
+        vmPort: parseInt(m[4]),
+        note: pendingNote
+      });
+      pendingNote = '';
+    } else if (!line.startsWith('iptables')) {
+      pendingNote = '';
+    }
+  }
+
+  showImportPreview();
+}
+
+function showImportPreview() {
+  if (!parsedImport.length) {
+    document.getElementById('import-msg-area').innerHTML =
+      '<p style="color:var(--red);font-size:13px">No valid DNAT rules found in this file. Make sure it was generated by this tool or follows the same iptables format.</p>';
+    return;
+  }
+
+  const existing = new Set(rules.map(r => r.proto + ':' + r.hostPort));
+  let html = '';
+  let newCount = 0, skipCount = 0;
+
+  parsedImport.forEach(r => {
+    const isDup = existing.has(r.proto + ':' + r.hostPort);
+    const isReserved = !!RESERVED[r.hostPort];
+    const skip = isDup || isReserved;
+    if (skip) skipCount++; else newCount++;
+    const status = isReserved
+      ? `<span class="import-row-skip">reserved</span>`
+      : isDup
+        ? `<span class="import-row-skip">duplicate</span>`
+        : `<span class="import-row-ok">new</span>`;
+    html += `<div class="rule-row">
+      <span><span class="badge ${r.proto}">${r.proto.toUpperCase()}</span></span>
+      <span class="mono">${cfg.pubIp || '?'}:<strong>${r.hostPort}</strong></span>
+      <span class="arrow">→</span>
+      <span class="mono">${r.vmIp}:<strong>${r.vmPort}</strong></span>
+      <span></span>
+      <span class="note-cell">${r.note || '—'}</span>
+      <span>${status}</span>
+    </div>`;
+  });
+
+  document.getElementById('import-preview-body').innerHTML = html;
+  document.getElementById('import-summary').textContent =
+    `Found ${parsedImport.length} rule(s) — ${newCount} new, ${skipCount} skipped (duplicate/reserved)`;
+  document.getElementById('import-preview').style.display = 'block';
+  document.getElementById('import-msg-area').innerHTML = '';
+}
+
+function confirmImport(mode) {
+  const existing = new Set(rules.map(r => r.proto + ':' + r.hostPort));
+
+  if (mode === 'replace') {
+    rules = parsedImport.filter(r => !RESERVED[r.hostPort]);
+  } else {
+    // merge: only add non-duplicate, non-reserved
+    parsedImport.forEach(r => {
+      if (!RESERVED[r.hostPort] && !existing.has(r.proto + ':' + r.hostPort)) {
+        rules.push(r);
+      }
+    });
+  }
+
+  persist(); renderRules(); renderScript();
+  cancelImport();
+
+  document.getElementById('import-msg-area').innerHTML =
+    `<p style="color:var(--green);font-size:13px">✓ Import complete (${mode}). ${rules.length} rule(s) now active.</p>`;
+
+  setTimeout(() => showTab('rules'), 1200);
+}
+
+function cancelImport() {
+  parsedImport = [];
+  document.getElementById('import-preview').style.display = 'none';
+  document.getElementById('import-file').value = '';
+}
+// ────────────────────────────────────────────────────────────────
 
 // Init
 const configured = cfg.pubIf && cfg.pubIp && cfg.natNet;
